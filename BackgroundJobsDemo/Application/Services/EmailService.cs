@@ -7,58 +7,123 @@ public class EmailService : IEmailService
 {
     private readonly List<EmailMessage> _queue = new();
     private int _nextId = 1;
-    private readonly object _lock = new();
+    private readonly SemaphoreSlim _semaphore = new(1, 1);
+    private const int MaxRetries = 3;
 
-    public Task<int> QueueEmailAsync(EmailRequestDto request)
+    public async Task<int> QueueEmailAsync(EmailRequestDto request)
     {
-        lock (_lock)
+        var email = new EmailMessage
         {
-            var email = new EmailMessage
-            {
-                Id = _nextId++,
-                To = request.To,
-                Subject = request.Subject,
-                Body = request.Body,
-                CreatedAt = DateTime.UtcNow,
-                IsProcessed = false
-            };
+            Id = _nextId++,
+            To = request.To,
+            Subject = request.Subject,
+            Body = request.Body,
+            CreatedAt = DateTime.UtcNow,
+            Status = EmailStatus.Pending,
+            RetryCount = 0
+        };
+
+        await _semaphore.WaitAsync();
+        try
+        {
             _queue.Add(email);
-            return Task.FromResult(email.Id);
         }
+        finally
+        {
+            _semaphore.Release();
+        }
+
+        return email.Id;
     }
 
-    public Task<IEnumerable<EmailResponseDto>> GetPendingEmailsAsync()
+    public async Task<IEnumerable<EmailResponseDto>> GetPendingEmailsAsync()
     {
-        lock (_lock)
+        await _semaphore.WaitAsync();
+        try
         {
-            var result = _queue
-                .Where(e => !e.IsProcessed)
-                .Select(e => new EmailResponseDto(e.Id, "pending"))
+            return _queue
+                .Where(e => e.Status == EmailStatus.Pending || e.Status == EmailStatus.Processing || e.Status == EmailStatus.Failed)
+                .Select(e => new EmailResponseDto(e.Id, e.Status.ToString().ToLowerInvariant()))
                 .ToList();
-            return Task.FromResult<IEnumerable<EmailResponseDto>>(result);
         }
-    }
-
-    public Task<EmailQueueItem?> GetNextPendingAsync()
-    {
-        lock (_lock)
+        finally
         {
-            var email = _queue.FirstOrDefault(e => !e.IsProcessed);
-            if (email == null) return Task.FromResult<EmailQueueItem?>(null);
-            return Task.FromResult<EmailQueueItem?>(new EmailQueueItem(email.Id, email.To, email.Subject, email.Body));
+            _semaphore.Release();
         }
     }
 
-    public Task MarkAsProcessedAsync(int id)
+    public async Task<IReadOnlyList<EmailMessage>> GetAllPendingAsync()
     {
-        lock (_lock)
+        await _semaphore.WaitAsync();
+        try
+        {
+            return _queue
+                .Where(e => e.Status == EmailStatus.Pending)
+                .OrderBy(e => e.CreatedAt)
+                .ToList();
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    public async Task<bool> TryMarkAsProcessingAsync(int id)
+    {
+        await _semaphore.WaitAsync();
+        try
+        {
+            var email = _queue.FirstOrDefault(e => e.Id == id && e.Status == EmailStatus.Pending);
+            if (email == null) return false;
+            email.Status = EmailStatus.Processing;
+            return true;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    public async Task MarkAsProcessedAsync(int id)
+    {
+        await _semaphore.WaitAsync();
+        try
         {
             var email = _queue.FirstOrDefault(e => e.Id == id);
             if (email != null)
             {
-                email.IsProcessed = true;
+                email.Status = EmailStatus.Processed;
             }
         }
-        return Task.CompletedTask;
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    public async Task MarkAsFailedAsync(int id, string error)
+    {
+        await _semaphore.WaitAsync();
+        try
+        {
+            var email = _queue.FirstOrDefault(e => e.Id == id);
+            if (email == null) return;
+            
+            email.RetryCount++;
+            email.LastError = error;
+            
+            if (email.RetryCount >= MaxRetries)
+            {
+                email.Status = EmailStatus.Failed;
+            }
+            else
+            {
+                email.Status = EmailStatus.Pending;
+            }
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
     }
 }
