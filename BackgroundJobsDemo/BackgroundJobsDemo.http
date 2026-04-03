@@ -1,0 +1,6 @@
+@BackgroundJobsDemo_HostAddress = http://localhost:5070
+
+GET {{BackgroundJobsDemo_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
