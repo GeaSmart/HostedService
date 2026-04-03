@@ -1,14 +1,17 @@
 using BackgroundJobsDemo.Application.DTOs;
+using BackgroundJobsDemo.Application.Options;
 using BackgroundJobsDemo.Domain;
+using Microsoft.Extensions.Options;
 
 namespace BackgroundJobsDemo.Application.Services;
 
-public class EmailService : IEmailService
+public class EmailService(
+    IOptions<EmailProcessingOptions> options) : IEmailService
 {
     private readonly List<EmailMessage> _queue = new();
     private int _nextId = 1;
     private readonly SemaphoreSlim _semaphore = new(1, 1);
-    private const int MaxRetries = 3;
+    private int MaxRetries => options.Value.MaxRetries;
 
     public async Task<int> QueueEmailAsync(EmailRequestDto request)
     {
